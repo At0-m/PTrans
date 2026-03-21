@@ -1,4 +1,4 @@
-package domain
+package state
 
 import (
 	"encoding/json"
