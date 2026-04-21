@@ -3,8 +3,8 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
-	"time"
 
 	"github.com/At0-m/PTrans/internal/domain"
 )
@@ -35,6 +35,22 @@ func (s *Store) GetPayment(id string) (domain.Payment, bool) {
 	return *p, true
 }
 
+func (s *Store) GetPaymentByIdempotencyKey(key string) (domain.Payment, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	id, ok := s.idempotencyIndex[key]
+	if !ok {
+		return domain.Payment{}, false
+	}
+
+	p, ok := s.payments[id]
+	if !ok {
+		return domain.Payment{}, false
+	}
+	return *p, true
+}
+
 func (s *Store) ListPayments() []domain.Payment {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -43,6 +59,11 @@ func (s *Store) ListPayments() []domain.Payment {
 	for _, p := range s.payments {
 		result = append(result, *p)
 	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+
 	return result
 }
 
@@ -55,6 +76,22 @@ func (s *Store) GetSubscription(id string) (domain.WebhookSubscription, bool) {
 		return domain.WebhookSubscription{}, false
 	}
 	return *sub, true
+}
+
+func (s *Store) ListSubscriptions() []domain.WebhookSubscription {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]domain.WebhookSubscription, 0, len(s.subscriptions))
+	for _, sub := range s.subscriptions {
+		result = append(result, *sub)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreateAt.After(result[j].CreateAt)
+	})
+
+	return result
 }
 
 func (s *Store) Apply(evt domain.Event) error {
@@ -72,25 +109,19 @@ func (s *Store) Apply(evt domain.Event) error {
 		return s.applyWebhookSubscriptionActivated(evt)
 	case domain.EventWebhookSubscriptionDeactivated:
 		return s.applyWebhookSubscriptionDeactivated(evt)
-
 	default:
 		return fmt.Errorf("unknown event type: %s", evt.EventType)
 	}
 }
 
-type PaymentCreatedPayload struct {
-	ID             string               `json:"id"`
-	Amount         int64                `json:"amount"`
-	Currency       string               `json:"currency"`
-	IdempotencyKey string               `json:"idempotency_key"`
-	Status         domain.PaymentStatus `json:"status"`
-	CreatedAt      time.Time            `json:"created_at"`
-}
-
 func (s *Store) applyPaymentCreated(evt domain.Event) error {
-	var payload PaymentCreatedPayload
+	var payload domain.PaymentCreatedPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return fmt.Errorf("unmarshal PaymentCreated payload: %w", err)
+	}
+
+	if _, exists := s.payments[payload.ID]; exists {
+		return fmt.Errorf("payment %s already exists during apply", payload.ID)
 	}
 
 	s.payments[payload.ID] = &domain.Payment{
@@ -110,13 +141,8 @@ func (s *Store) applyPaymentCreated(evt domain.Event) error {
 	return nil
 }
 
-type PaymentCancelledPayload struct {
-	ID          string    `json:"id"`
-	CancelledAt time.Time `json:"cancelled_at"`
-}
-
 func (s *Store) applyPaymentCancelled(evt domain.Event) error {
-	var payload PaymentCancelledPayload
+	var payload domain.PaymentCancelledPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return fmt.Errorf("unmarshal PaymentCancelled payload: %w", err)
 	}
@@ -131,15 +157,8 @@ func (s *Store) applyPaymentCancelled(evt domain.Event) error {
 	return nil
 }
 
-type WebhookSubscriptionCreatedPayload struct {
-	ID        string    `json:"id"`
-	URL       string    `json:"url"`
-	Active    bool      `json:"active"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
 func (s *Store) applyWebhookSubscriptionCreated(evt domain.Event) error {
-	var payload WebhookSubscriptionCreatedPayload
+	var payload domain.WebhookSubscriptionCreatedPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return fmt.Errorf("unmarshal WebhookSubscriptionCreated payload: %w", err)
 	}
@@ -152,20 +171,15 @@ func (s *Store) applyWebhookSubscriptionCreated(evt domain.Event) error {
 		ID:        payload.ID,
 		URL:       payload.URL,
 		Active:    payload.Active,
-		CreatedAt: payload.CreatedAt,
-		UpdateAt:  payload.CreatedAt,
+		CreateAt: payload.CreatedAt,
+		UpdatedAt: payload.CreatedAt,
 	}
 
 	return nil
 }
 
-type WebhookSubscriptionActivatedPayload struct {
-	ID          string    `json:"id"`
-	ActivatedAt time.Time `json:"activated_at"`
-}
-
 func (s *Store) applyWebhookSubscriptionActivated(evt domain.Event) error {
-	var payload WebhookSubscriptionActivatedPayload
+	var payload domain.WebhookSubscriptionActivatedPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return fmt.Errorf("unmarshal WebhookSubscriptionActivated payload: %w", err)
 	}
@@ -176,18 +190,13 @@ func (s *Store) applyWebhookSubscriptionActivated(evt domain.Event) error {
 	}
 
 	sub.Active = true
-	sub.UpdateAt = payload.ActivatedAt
+	sub.UpdatedAt = payload.ActivatedAt
 
 	return nil
 }
 
-type WebhookSubscriptionDeactivatedPayload struct {
-	ID            string    `json:"id"`
-	DeactivatedAt time.Time `json:"deactivated_at"`
-}
-
 func (s *Store) applyWebhookSubscriptionDeactivated(evt domain.Event) error {
-	var payload WebhookSubscriptionDeactivatedPayload
+	var payload domain.WebhookSubscriptionDeactivatedPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return fmt.Errorf("unmarshal WebhookSubscriptionDeactivated payload: %w", err)
 	}
@@ -198,7 +207,7 @@ func (s *Store) applyWebhookSubscriptionDeactivated(evt domain.Event) error {
 	}
 
 	sub.Active = false
-	sub.UpdateAt = payload.DeactivatedAt
+	sub.UpdatedAt = payload.DeactivatedAt
 
 	return nil
 }

@@ -6,7 +6,7 @@ import (
 )
 
 type errorResponse struct {
-	Error string `json"error"`
+	Error string `json:"error"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -16,7 +16,5 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, errorResponse{
-		Error: msg,
-	})
+	writeJSON(w, status, errorResponse{Error: msg})
 }

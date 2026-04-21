@@ -3,21 +3,25 @@ package domain
 import "time"
 
 type WebhookSubscription struct {
-	ID        string
-	URL       string
-	Active    bool
-	CreatedAt time.Time
-	UpdateAt  time.Time
+	ID        string    `json:"id"`
+	URL       string    `json:"url"`
+	Active    bool      `json:"active"`
+	CreateAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func (s WebhookSubscription) Activate() {
+func (s *WebhookSubscription) Activate() {
 	s.Active = true
 }
 
-func (s WebhookSubscription) Deactivete() {
+func (s *WebhookSubscription) Deactivate() {
 	s.Active = false
 }
 
-func (s WebhookSubscription) SetActive(flag bool) {
+func (s *WebhookSubscription) Deactivete() {
+	s.Deactivate()
+}
+
+func (s *WebhookSubscription) SetActive(flag bool) {
 	s.Active = flag
 }

@@ -86,6 +86,7 @@ func (s *JSONLStore) Replay(ctx context.Context, apply func(domain.Event) error)
 
 	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		if err := ctx.Err(); err != nil {
 			return err
 		}
