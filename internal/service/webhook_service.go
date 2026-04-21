@@ -2,85 +2,80 @@ package service
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/At0-m/PTrans/internal/domain"
-	"github.com/At0-m/PTrans/internal/eventlog"
-	"github.com/At0-m/PTrans/internal/state"
 )
 
 type WebhookService struct {
-	store      *state.Store
-	eventStore eventlog.EventStore
+	repo WebhookRepository
 }
 
-func NewWebhookService(store *state.Store, eventStore eventlog.EventStore) *WebhookService {
-	return &WebhookService{
-		store:      store,
-		eventStore: eventStore,
-	}
+type CreateWebhookSubscriptionInput struct {
+	UserID string
+	URL    string
+	Active bool
 }
 
-func (s *WebhookService) GetSubscription(id string) (domain.WebhookSubscription, error) {
-	sub, ok := s.store.GetSubscription(id)
-	if !ok {
-		return domain.WebhookSubscription{}, domain.ErrSubsctiptionNotFound
-	}
-	return sub, nil
+func NewWebhookService(repo WebhookRepository) *WebhookService {
+	return &WebhookService{repo: repo}
 }
 
-func (s *WebhookService) SetSubscriptionActive(ctx context.Context, id string, active bool) error {
-	sub, ok := s.store.GetSubscription(id)
-	if !ok {
-		return domain.ErrSubsctiptionNotFound
+func (s *WebhookService) CreateSubscription(ctx context.Context, input CreateWebhookSubscriptionInput) (domain.WebhookSubscription, error) {
+	if strings.TrimSpace(input.UserID) == "" {
+		return domain.WebhookSubscription{}, domain.ErrUserIDRequired
 	}
-	if sub.Active == active {
-		return nil
+
+	normalizedURL, err := normalizeWebhookURL(input.URL)
+	if err != nil {
+		return domain.WebhookSubscription{}, err
 	}
 
 	now := time.Now().UTC()
-
-	var (
-		eventType domain.EventType
-		payload   any
-	)
-
-	if active {
-		eventType = domain.EventWebhookSubscriptionActivated
-		payload = domain.WebhookSubscriptionActivatedPayload{
-			ID:          id,
-			ActivatedAt: now,
-		}
-	} else {
-		eventType = domain.EventWebhookSubscriptionDeactivated
-		payload = domain.WebhookSubscriptionDeactivatedPayload{
-			ID:            id,
-			DeactivatedAt: now,
-		}
+	subscription := domain.WebhookSubscription{
+		ID:        generateSubscriptionID(),
+		URL:       normalizedURL,
+		Active:    input.Active,
+		CreateAt: now,
+		UpdatedAt: now,
 	}
-	payloadBytes, err := json.Marshal(payload)
+
+	return s.repo.CreateSubscription(ctx, input.UserID, subscription)
+}
+
+func (s *WebhookService) ListSubscriptions(ctx context.Context, userID string) ([]domain.WebhookSubscription, error) {
+	if strings.TrimSpace(userID) == "" {
+		return nil, domain.ErrUserIDRequired
+	}
+	return s.repo.ListSubscriptions(ctx, userID)
+}
+
+func (s *WebhookService) GetSubscription(ctx context.Context, userID, id string) (domain.WebhookSubscription, error) {
+	if strings.TrimSpace(userID) == "" {
+		return domain.WebhookSubscription{}, domain.ErrUserIDRequired
+	}
+	return s.repo.GetSubscription(ctx, userID, id)
+}
+
+func (s *WebhookService) SetSubscriptionActive(ctx context.Context, userID, id string, active bool) error {
+	if strings.TrimSpace(userID) == "" {
+		return domain.ErrUserIDRequired
+	}
+	return s.repo.SetSubscriptionActive(ctx, userID, id, active, time.Now().UTC())
+}
+
+func normalizeWebhookURL(rawURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return fmt.Errorf("marshal webhook subscription event payload: %w", err)
+		return "", domain.ErrInvalidWebhookURL
 	}
-
-	evt := domain.Event{
-		EventID:       generateEventID(),
-		AggregateType: "webhook_subscription",
-		AggregateID:   id,
-		EventType:     eventType,
-		Timestamp:     now,
-		Payload:       payloadBytes,
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", domain.ErrInvalidWebhookURL
 	}
-
-	if err := s.eventStore.Append(ctx, evt); err != nil {
-		return fmt.Errorf("append webhook subscription event: %w", err)
+	if parsed.Host == "" {
+		return "", domain.ErrInvalidWebhookURL
 	}
-
-	if err := s.store.Apply(evt); err != nil {
-		return fmt.Errorf("append webhook subscription event: %w", err)
-	}
-
-	return nil
+	return parsed.String(), nil
 }

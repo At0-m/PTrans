@@ -2,104 +2,90 @@ package service
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"sort"
+	"strings"
 	"time"
 
 	"github.com/At0-m/PTrans/internal/domain"
-	"github.com/At0-m/PTrans/internal/eventlog"
-	"github.com/At0-m/PTrans/internal/state"
 )
 
 type PaymentService struct {
-	store      *state.Store
-	eventStore eventlog.EventStore
+	repo PaymentRepository
 }
 
-func NewEventStore(store *state.Store, eventStore eventlog.EventStore) *PaymentService {
-	return &PaymentService{
-		store:      store,
-		eventStore: eventStore,
+type CreatePaymentInput struct {
+	UserID         string
+	Amount         int64
+	Currency       string
+	IdempotencyKey string
+}
+
+func NewPaymentService(repo PaymentRepository) *PaymentService {
+	return &PaymentService{repo: repo}
+}
+
+func (s *PaymentService) CreatePayment(ctx context.Context, input CreatePaymentInput) (domain.Payment, bool, error) {
+	if strings.TrimSpace(input.UserID) == "" {
+		return domain.Payment{}, false, domain.ErrUserIDRequired
 	}
+	if input.Amount <= 0 {
+		return domain.Payment{}, false, domain.ErrInvalidAmount
+	}
+
+	currency := normalizeCurrency(input.Currency)
+	if !isValidCurrency(currency) {
+		return domain.Payment{}, false, domain.ErrInvalidCurrency
+	}
+
+	now := time.Now().UTC()
+	payment := domain.Payment{
+		ID:             generatePaymentID(),
+		Amount:         input.Amount,
+		Currency:       currency,
+		Status:         domain.PaymentPending,
+		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	requestHash := hashCreatePaymentRequest(input.Amount, currency)
+	return s.repo.CreatePayment(ctx, input.UserID, payment, requestHash)
 }
 
-func generateEventID() string {
-	return fmt.Sprintf("evt_%d", time.Now().UnixNano())
+func (s *PaymentService) GetPayment(ctx context.Context, userID, id string) (domain.Payment, error) {
+	if strings.TrimSpace(userID) == "" {
+		return domain.Payment{}, domain.ErrUserIDRequired
+	}
+	return s.repo.GetPayment(ctx, userID, id)
 }
 
-func (s *PaymentService) ListPayments(status string, page, size int) ([]domain.Payment, int, error) {
+func (s *PaymentService) ListPayments(ctx context.Context, userID, status string, page, size int) ([]domain.Payment, int, error) {
+	if strings.TrimSpace(userID) == "" {
+		return nil, 0, domain.ErrUserIDRequired
+	}
 	if page < 1 || size < 1 {
 		return nil, 0, domain.ErrInvalidPagination
 	}
 
-	payments := s.store.ListPayments()
-
+	status = normalizePaymentStatus(status)
 	if status != "" && !IsValidPaymentStatus(status) {
 		return nil, 0, domain.ErrInvalidStatusFilter
 	}
 
-	filtred := make([]domain.Payment, 0, len(payments))
-	for _, p := range payments {
-		if status == "" || string(p.Status) == status {
-			filtred = append(filtred, p)
-		}
-	}
-
-	sort.Slice(filtred, func(i, j int) bool {
-		return filtred[i].CreatedAt.After(filtred[j].CreatedAt)
+	return s.repo.ListPayments(ctx, userID, PaymentListFilter{
+		Status: status,
+		Page:   page,
+		Size:   size,
 	})
-
-	total := len(filtred)
-	offset := (page - 1) * size
-	if offset >= total {
-		return []domain.Payment{}, total, nil
-	}
-	end := offset + size
-	if end > total {
-		end = total
-	}
-	return filtred[offset:end], total, nil
 }
 
-func (s *PaymentService) CancelPayment(ctx context.Context, id string) error {
-	payment, ok := s.store.GetPayment(id)
-	if !ok {
-		return domain.ErrPaymentNotFound
+func (s *PaymentService) CancelPayment(ctx context.Context, userID, id string) error {
+	if strings.TrimSpace(userID) == "" {
+		return domain.ErrUserIDRequired
 	}
-	if payment.Status != domain.PaymentPending {
-		return domain.ErrInvalidPaymentState
-	}
-
-	cancelledAt := time.Now().UTC()
-	payload := domain.PaymentCancelledPayload{
-		ID:          id,
-		CancelledAt: cancelledAt,
-	}
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal PaymentCancelled payload: %w", err)
-	}
-
-	evt := domain.Event{
-		EventID:       generateEventID(),
-		AggregateType: "payment",
-		AggregateID:   id,
-		EventType:     domain.EventPaymentCancelled,
-		Timestamp:     cancelledAt,
-		Payload:       payloadBytes,
-	}
-
-	if err := s.eventStore.Append(ctx, evt); err != nil {
-		return fmt.Errorf("append PaymentCancelled event: %w", err)
-	}
-
-	if err := s.store.Apply(evt); err != nil {
-		return fmt.Errorf("apply PaymentCancelled event: %w", err)
-	}
-
-	return nil
+	return s.repo.CancelPayment(ctx, userID, id, time.Now().UTC())
 }
 
 func IsValidPaymentStatus(status string) bool {
@@ -107,10 +93,35 @@ func IsValidPaymentStatus(status string) bool {
 	case domain.PaymentCancelled,
 		domain.PaymentFailed,
 		domain.PaymentPending,
-		domain.PaymentProcesing,
+		domain.PaymentProcessing,
 		domain.PaymentSucceeded:
 		return true
 	default:
 		return false
 	}
+}
+
+func normalizeCurrency(currency string) string {
+	return strings.ToUpper(strings.TrimSpace(currency))
+}
+
+func normalizePaymentStatus(status string) string {
+	return strings.ToUpper(strings.TrimSpace(status))
+}
+
+func isValidCurrency(currency string) bool {
+	if len(currency) != 3 {
+		return false
+	}
+	for _, r := range currency {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+func hashCreatePaymentRequest(amount int64, currency string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("amount=%d;currency=%s", amount, currency)))
+	return hex.EncodeToString(sum[:])
 }
