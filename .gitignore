@@ -1,6 +1,11 @@
-bin/
-*.exe
-*.out
-*.test
-vendor/
 .env
+*.log
+*.out
+coverage.txt
+/payment
+/worker
+/mockwebhook
+/ptrans-api
+/ptrans-worker
+/ptrans-mock-webhook
+postgres_data/
