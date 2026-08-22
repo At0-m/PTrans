@@ -38,7 +38,7 @@ func (s *WebhookService) CreateSubscription(ctx context.Context, input CreateWeb
 		ID:        generateSubscriptionID(),
 		URL:       normalizedURL,
 		Active:    input.Active,
-		CreateAt: now,
+		CreateAt:  now,
 		UpdatedAt: now,
 	}
 
