@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/At0-m/PTrans/internal/domain"
@@ -33,13 +35,35 @@ type rateLimiter interface {
 	Limit() int
 }
 
+type HealthChecker interface {
+	Ping(ctx context.Context) error
+}
+
+type Option func(*API)
+
+func WithHealthChecker(checker HealthChecker) Option {
+	return func(api *API) {
+		api.healthChecker = checker
+	}
+}
+
+func WithLogger(logger *slog.Logger) Option {
+	return func(api *API) {
+		api.logger = logger
+	}
+}
+
 type userIDContextKey struct{}
 
 type API struct {
 	paymentService *service.PaymentService
 	webhookService *service.WebhookService
 	limiter        rateLimiter
+	healthChecker  HealthChecker
+	logger         *slog.Logger
 }
+
+var requestIDSeq atomic.Uint64
 
 type createPaymentRequest struct {
 	Amount   int64  `json:"amount"`
@@ -67,11 +91,24 @@ type setSubscriptionActiveRequest struct {
 	Active *bool `json:"active"`
 }
 
-func NewRouter(paymentService *service.PaymentService, webhookService *service.WebhookService, limiter rateLimiter) http.Handler {
-	api := &API{paymentService: paymentService, webhookService: webhookService, limiter: limiter}
+func NewRouter(paymentService *service.PaymentService, webhookService *service.WebhookService, limiter rateLimiter, opts ...Option) http.Handler {
+	api := &API{
+		paymentService: paymentService,
+		webhookService: webhookService,
+		limiter:        limiter,
+		logger:         slog.Default(),
+	}
+	for _, opt := range opts {
+		opt(api)
+	}
+	if api.logger == nil {
+		api.logger = slog.Default()
+	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", api.handleHealth)
+	mux.HandleFunc("GET /livez", api.handleLive)
+	mux.HandleFunc("GET /readyz", api.handleReady)
+	mux.HandleFunc("GET /healthz", api.handleReady)
 	mux.Handle("GET /v1/payments", api.requireUser(http.HandlerFunc(api.handleListPayments)))
 	mux.Handle("POST /v1/payments", api.requireUser(api.withRateLimit("payments:create", http.HandlerFunc(api.handleCreatePayment))))
 	mux.Handle("GET /v1/payments/{id}", api.requireUser(http.HandlerFunc(api.handleGetPayment)))
@@ -81,10 +118,27 @@ func NewRouter(paymentService *service.PaymentService, webhookService *service.W
 	mux.Handle("GET /v1/webhooks/subscriptions/{id}", api.requireUser(http.HandlerFunc(api.handleGetSubscription)))
 	mux.Handle("PATCH /v1/webhooks/subscriptions/{id}", api.requireUser(api.withRateLimit("webhooks:update", http.HandlerFunc(api.handlePatchSubscription))))
 
-	return withCORS(mux)
+	return api.withRequestLogging(withCORS(mux))
 }
 
-func (api *API) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (api *API) handleLive(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (api *API) handleReady(w http.ResponseWriter, r *http.Request) {
+	if api.healthChecker == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
+	if err := api.healthChecker.Ping(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "unavailable",
+			"error":  "database ping failed",
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -337,5 +391,48 @@ func (api *API) withRateLimit(scope string, next http.Handler) http.Handler {
 		}
 
 		next.ServeHTTP(w, r)
+	})
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	bytes      int
+}
+
+func (w *loggingResponseWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *loggingResponseWriter) Write(data []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(data)
+	w.bytes += n
+	return n, err
+}
+
+func (api *API) withRequestLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = fmt.Sprintf("req_%d_%d", started.UTC().UnixNano(), requestIDSeq.Add(1))
+		}
+		w.Header().Set("X-Request-ID", requestID)
+
+		wrapped := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(wrapped, r)
+
+		api.logger.Info("http request completed",
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", wrapped.statusCode,
+			"bytes", wrapped.bytes,
+			"latency_ms", time.Since(started).Milliseconds(),
+		)
 	})
 }
