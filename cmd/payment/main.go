@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,6 +38,9 @@ func (a limiterAdapter) Limit() int {
 }
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -47,7 +50,8 @@ func main() {
 
 	store, err := postgresstore.New(ctx, databaseURL)
 	if err != nil {
-		log.Fatalf("create postgres store: %v", err)
+		logger.Error("create postgres store", "error", err)
+		os.Exit(1)
 	}
 	defer store.Close()
 
@@ -63,8 +67,14 @@ func main() {
 	}
 
 	server := &http.Server{
-		Addr:              listenAddr,
-		Handler:           httpapi.NewRouter(paymentService, webhookService, limiter),
+		Addr: listenAddr,
+		Handler: httpapi.NewRouter(
+			paymentService,
+			webhookService,
+			limiter,
+			httpapi.WithHealthChecker(store),
+			httpapi.WithLogger(logger),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -76,17 +86,18 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Printf("shutdown server: %v", err)
+			logger.Error("shutdown server", "error", err)
 		}
 	}()
 
-	if limiter == nil {
-		log.Printf("payment api listening on %s (postgres=%s, rate_limit=disabled)", listenAddr, maskDatabaseURL(databaseURL))
-	} else {
-		log.Printf("payment api listening on %s (postgres=%s, rate_limit=%d/min)", listenAddr, maskDatabaseURL(databaseURL), rateLimitPerMinute)
-	}
+	logger.Info("payment api listening",
+		"addr", listenAddr,
+		"postgres", maskDatabaseURL(databaseURL),
+		"rate_limit_per_minute", rateLimitPerMinute,
+	)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("listen and serve: %v", err)
+		logger.Error("listen and serve", "error", err)
+		os.Exit(1)
 	}
 }
 
