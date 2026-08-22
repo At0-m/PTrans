@@ -9,7 +9,7 @@ type EventType string
 
 const (
 	EventPaymentCreated                 EventType = "PaymentCreated"
-	EventPaymentCancelled               EventType = "Cancelled"
+	EventPaymentCancelled               EventType = "PaymentCancelled"
 	EventWebhookSubscriptionCreated     EventType = "WebhookSubscriptionCreated"
 	EventWebhookSubscriptionActivated   EventType = "WebhookSubscriptionActivated"
 	EventWebhookSubscriptionDeactivated EventType = "WebhookSubscriptionDeactivated"
