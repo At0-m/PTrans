@@ -6,7 +6,7 @@ type WebhookSubscription struct {
 	ID        string    `json:"id"`
 	URL       string    `json:"url"`
 	Active    bool      `json:"active"`
-	CreateAt time.Time `json:"created_at"`
+	CreateAt  time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
