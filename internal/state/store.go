@@ -171,7 +171,7 @@ func (s *Store) applyWebhookSubscriptionCreated(evt domain.Event) error {
 		ID:        payload.ID,
 		URL:       payload.URL,
 		Active:    payload.Active,
-		CreateAt: payload.CreatedAt,
+		CreateAt:  payload.CreatedAt,
 		UpdatedAt: payload.CreatedAt,
 	}
 
