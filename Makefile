@@ -1,29 +1,33 @@
 APP_URL ?= http://localhost:8080
 USER_ID ?= alice
-IDEMPOTENCY_KEY ?= order-1
 
-.PHONY: test build docker-build compose-up compose-down compose-reset logs api-logs worker-logs demo-payment demo-subscription demo cancel-payment ready live
+.PHONY: init test test-integration vet build docker-build compose-up compose-down logs api-logs worker-logs refund-logs ready live token seed demo demo-timeout
+
+init:
+	./scripts/init-env.sh
 
 test:
-	go test ./...
+	go test -race -count=1 ./...
+
+test-integration:
+	docker compose --profile test run --build --rm test
+
+vet:
+	go vet ./...
 
 build:
-	go build ./cmd/payment
-	go build ./cmd/worker
-	go build ./cmd/mockwebhook
+	mkdir -p bin
+	for cmd in payment worker mockwebhook refundworker mockprovider token seed; do go build -o bin/$$cmd ./cmd/$$cmd || exit 1; done
 
 docker-build:
 	docker build -t ptrans:local .
 
 compose-up:
 	docker compose up --build -d
+	./scripts/wait-ready.sh $(APP_URL)
 
 compose-down:
-	docker compose down
-
-compose-reset:
-	docker compose down -v
-	docker compose up --build -d
+	docker compose --profile test down
 
 logs:
 	docker compose logs -f
@@ -34,19 +38,23 @@ api-logs:
 worker-logs:
 	docker compose logs -f worker
 
+refund-logs:
+	docker compose logs -f refund-worker
+
 ready:
 	curl -fsS $(APP_URL)/readyz
 
 live:
 	curl -fsS $(APP_URL)/livez
 
-demo-subscription:
-	./scripts/create-subscription.sh $(APP_URL) $(USER_ID) http://mock-webhook:8090/hook
+token:
+	docker compose exec -T app ptrans-token -user $(USER_ID)
 
-demo-payment:
-	./scripts/create-payment.sh $(APP_URL) $(USER_ID) $(IDEMPOTENCY_KEY)
+seed:
+	docker compose exec -T -e ALLOW_DEMO_SEED=true app ptrans-seed -user $(USER_ID)
 
-demo: demo-subscription demo-payment
+demo:
+	./scripts/demo-refund.sh ok
 
-cancel-payment:
-	./scripts/cancel-payment.sh $(APP_URL) $(USER_ID) $(PAYMENT_ID)
+demo-timeout:
+	./scripts/demo-refund.sh timeout-after-success

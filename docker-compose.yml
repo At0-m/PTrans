@@ -1,3 +1,8 @@
+x-ptrans: &ptrans
+  image: ptrans:local
+  build: .
+  stop_grace_period: 15s
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,14 +11,14 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d ptrans"]
-      interval: 5s
+      interval: 2s
       timeout: 3s
-      retries: 10
+      retries: 20
 
   migrate:
     image: postgres:16-alpine
@@ -24,32 +29,35 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/ptrans?sslmode=disable
     volumes:
       - ./migrations:/migrations:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command: |
-      for migration in /migrations/*.sql; do
-        echo "applying $$migration"
-        psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$migration"
-      done
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for migration in /migrations/*.sql; do
+          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$migration"
+        done
 
   app:
-    build: .
+    <<: *ptrans
     depends_on:
       migrate:
         condition: service_completed_successfully
     environment:
-      LISTEN_ADDR: :8080
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/ptrans?sslmode=disable
-      RATE_LIMIT_MUTATIONS_PER_MINUTE: 20
+      LISTEN_ADDR: :8080
+      JWT_SECRET: ${JWT_SECRET:?Run make init first}
+      JWT_ISSUER: ${JWT_ISSUER:-ptrans}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-ptrans-api}
+      RATE_LIMIT_MUTATIONS_PER_MINUTE: ${RATE_LIMIT_MUTATIONS_PER_MINUTE:-20}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
-      interval: 10s
+      interval: 2s
       timeout: 3s
-      retries: 5
+      retries: 20
 
   worker:
-    build: .
+    <<: *ptrans
     command: ["/usr/local/bin/ptrans-worker"]
     depends_on:
       migrate:
@@ -64,14 +72,83 @@ services:
       WEBHOOK_INITIAL_BACKOFF: 2s
       WEBHOOK_MAX_BACKOFF: 1m
 
+  refund-worker:
+    <<: *ptrans
+    command: ["/usr/local/bin/ptrans-refund-worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-provider:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/ptrans?sslmode=disable
+      PROVIDER_URL: http://mock-provider:8091
+      PROVIDER_API_KEY: ${PROVIDER_API_KEY:?Run make init first}
+      PROVIDER_HTTP_TIMEOUT: ${PROVIDER_HTTP_TIMEOUT:-5s}
+      REFUND_POLL_INTERVAL: ${REFUND_POLL_INTERVAL:-1s}
+      REFUND_CHECK_INTERVAL: ${REFUND_CHECK_INTERVAL:-30s}
+      REFUND_LEASE_DURATION: ${REFUND_LEASE_DURATION:-30s}
+      REFUND_STUCK_AFTER: ${REFUND_STUCK_AFTER:-10m}
+      REFUND_INITIAL_BACKOFF: ${REFUND_INITIAL_BACKOFF:-2s}
+      REFUND_MAX_BACKOFF: ${REFUND_MAX_BACKOFF:-1m}
+      REFUND_MAX_ATTEMPTS: ${REFUND_MAX_ATTEMPTS:-5}
+      REFUND_MAX_CHECK_FAILURES: ${REFUND_MAX_CHECK_FAILURES:-5}
+      REFUND_BATCH_SIZE: ${REFUND_BATCH_SIZE:-10}
+
+  mock-provider:
+    <<: *ptrans
+    command: ["/usr/local/bin/ptrans-mock-provider"]
+    environment:
+      PROVIDER_API_KEY: ${PROVIDER_API_KEY:?Run make init first}
+      MOCK_PROVIDER_ADDR: :8091
+      MOCK_PROVIDER_DATA: /data/provider.json
+      MOCK_PROVIDER_MODE: ${MOCK_PROVIDER_MODE:-ok}
+      MOCK_PROVIDER_DELAY: ${MOCK_PROVIDER_DELAY:-8s}
+    ports:
+      - "127.0.0.1:8091:8091"
+    volumes:
+      - provider_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8091/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
   mock-webhook:
-    build: .
+    <<: *ptrans
     command: ["/usr/local/bin/ptrans-mock-webhook"]
     environment:
       MOCK_WEBHOOK_ADDR: :8090
       MOCK_WEBHOOK_MODE: ok
     ports:
-      - "8090:8090"
+      - "127.0.0.1:8090:8090"
+
+  postgres-test:
+    image: postgres:16-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: ptrans_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ptrans_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    environment:
+      TEST_DATABASE_URL: postgres://postgres:postgres@postgres-test:5432/ptrans_test?sslmode=disable
 
 volumes:
   postgres_data:
+  provider_data:
