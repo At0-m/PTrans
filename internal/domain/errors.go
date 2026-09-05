@@ -13,5 +13,5 @@ var (
 	ErrInvalidCurrency      = errors.New("invalid currency")
 	ErrInvalidWebhookURL    = errors.New("invalid webhook url")
 	ErrIdempotencyConflict  = errors.New("idempotency key already used with different payload")
-	ErrUserIDRequired       = errors.New("header X-User-ID is required")
+	ErrUserIDRequired       = errors.New("authenticated user is required")
 )
