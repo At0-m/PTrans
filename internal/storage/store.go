@@ -75,7 +75,9 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'idempotency_keys'),
     EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'rate_limit_windows'),
     EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'outbox_events'),
-    EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'webhook_deliveries')
+    EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'webhook_deliveries') AND
+    EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'refunds') AND
+    EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'reconciliation_results')
 `
 
 	var hasUsersTable bool
@@ -87,7 +89,7 @@ SELECT
 		return fmt.Errorf("check postgres schema: %w", err)
 	}
 	if !hasUsersTable || !hasIdempotencyTable || !hasRateLimitTable || !hasOutboxTable || !hasWebhookDeliveriesTable {
-		return fmt.Errorf("database schema is missing; apply migrations/001_init.sql and migrations/002_outbox.sql before starting the app")
+		return fmt.Errorf("database schema is missing; apply all migrations before starting the app")
 	}
 	return nil
 }
