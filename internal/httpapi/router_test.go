@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/At0-m/PTrans/internal/auth"
 	"github.com/At0-m/PTrans/internal/domain"
 	"github.com/At0-m/PTrans/internal/service"
 )
@@ -114,7 +115,7 @@ func (r *stubRepo) SetSubscriptionActive(_ context.Context, userID, id string, a
 func TestRouterCreatePaymentAndList(t *testing.T) {
 	t.Parallel()
 	repo := newStubRepo()
-	handler := NewRouter(service.NewPaymentService(repo), service.NewWebhookService(repo), nil)
+	handler := NewRouter(service.NewPaymentService(repo), service.NewWebhookService(repo), nil, WithAuthenticator(testAuth(t)))
 
 	body, err := json.Marshal(map[string]any{"amount": 999, "currency": "rub"})
 	if err != nil {
@@ -124,7 +125,7 @@ func TestRouterCreatePaymentAndList(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/payments", bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Idempotency-Key", "checkout-1")
-	request.Header.Set("X-User-ID", "alice")
+	request.Header.Set("Authorization", "Bearer "+testToken(t, "alice"))
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -133,7 +134,7 @@ func TestRouterCreatePaymentAndList(t *testing.T) {
 	}
 
 	listRequest := httptest.NewRequest(http.MethodGet, "/v1/payments?page=1&size=10", nil)
-	listRequest.Header.Set("X-User-ID", "alice")
+	listRequest.Header.Set("Authorization", "Bearer "+testToken(t, "alice"))
 	listResponse := httptest.NewRecorder()
 	handler.ServeHTTP(listResponse, listRequest)
 	if listResponse.Code != http.StatusOK {
@@ -152,38 +153,55 @@ func TestRouterCreatePaymentAndList(t *testing.T) {
 	}
 }
 
-func TestRouterRequiresUserHeader(t *testing.T) {
+func TestRouterRequiresJWT(t *testing.T) {
 	t.Parallel()
 	repo := newStubRepo()
-	handler := NewRouter(service.NewPaymentService(repo), service.NewWebhookService(repo), nil)
+	handler := NewRouter(service.NewPaymentService(repo), service.NewWebhookService(repo), nil, WithAuthenticator(testAuth(t)))
 	request := httptest.NewRequest(http.MethodGet, "/v1/payments?page=1&size=10", nil)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for missing user header, got %d", response.Code)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing JWT, got %d", response.Code)
 	}
 
 	var payload map[string]string
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if payload["error"] != domain.ErrUserIDRequired.Error() {
-		t.Fatalf("expected missing user error, got %v", payload)
+	if payload["error"] != "bearer token required" {
+		t.Fatalf("expected missing token error, got %v", payload)
 	}
 }
 
 func TestRouterRejectsInvalidPagination(t *testing.T) {
 	t.Parallel()
 	repo := newStubRepo()
-	handler := NewRouter(service.NewPaymentService(repo), service.NewWebhookService(repo), nil)
+	handler := NewRouter(service.NewPaymentService(repo), service.NewWebhookService(repo), nil, WithAuthenticator(testAuth(t)))
 
 	request := httptest.NewRequest(http.MethodGet, "/v1/payments?page=0&size=10", nil)
-	request.Header.Set("X-User-ID", "alice")
+	request.Header.Set("Authorization", "Bearer "+testToken(t, "alice"))
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid pagination, got %d: %s", response.Code, response.Body.String())
 	}
+}
+
+func testAuth(t *testing.T) *auth.Authenticator {
+	t.Helper()
+	a, err := auth.New(auth.Config{Secret: "test-key-that-is-longer-than-32-bytes", Issuer: "tests", Audience: "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+func testToken(t *testing.T, user string) string {
+	t.Helper()
+	token, err := testAuth(t).Issue(user, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
 }

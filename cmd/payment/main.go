@@ -11,8 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/At0-m/PTrans/internal/auth"
+	"github.com/At0-m/PTrans/internal/config"
 	"github.com/At0-m/PTrans/internal/httpapi"
 	"github.com/At0-m/PTrans/internal/ratelimit"
+	"github.com/At0-m/PTrans/internal/refunds"
 	"github.com/At0-m/PTrans/internal/service"
 	postgresstore "github.com/At0-m/PTrans/internal/storage"
 )
@@ -45,8 +48,14 @@ func main() {
 	defer stop()
 
 	listenAddr := envOrDefault("LISTEN_ADDR", ":8080")
-	databaseURL := envOrDefault("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/ptrans?sslmode=disable")
+	databaseURL := envOrDefault("DATABASE_URL", "postgres://postgres:postgres@localhost:5433/ptrans?sslmode=disable")
 	rateLimitPerMinute := envOrDefaultInt("RATE_LIMIT_MUTATIONS_PER_MINUTE", 20)
+
+	authenticator, err := auth.New(config.JWT())
+	if err != nil {
+		logger.Error("invalid JWT configuration", "error", err)
+		os.Exit(1)
+	}
 
 	store, err := postgresstore.New(ctx, databaseURL)
 	if err != nil {
@@ -72,6 +81,8 @@ func main() {
 			paymentService,
 			webhookService,
 			limiter,
+			httpapi.WithAuthenticator(authenticator),
+			httpapi.WithRefundService(refunds.NewService(store)),
 			httpapi.WithHealthChecker(store),
 			httpapi.WithLogger(logger),
 		),

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/At0-m/PTrans/internal/domain"
+	"github.com/At0-m/PTrans/internal/refunds"
 	"github.com/At0-m/PTrans/internal/service"
 )
 
@@ -56,6 +57,8 @@ func WithLogger(logger *slog.Logger) Option {
 type userIDContextKey struct{}
 
 type API struct {
+	authenticator  TokenAuthenticator
+	refundService  *refunds.Service
 	paymentService *service.PaymentService
 	webhookService *service.WebhookService
 	limiter        rateLimiter
@@ -118,6 +121,7 @@ func NewRouter(paymentService *service.PaymentService, webhookService *service.W
 	mux.Handle("GET /v1/webhooks/subscriptions/{id}", api.requireUser(http.HandlerFunc(api.handleGetSubscription)))
 	mux.Handle("PATCH /v1/webhooks/subscriptions/{id}", api.requireUser(api.withRateLimit("webhooks:update", http.HandlerFunc(api.handlePatchSubscription))))
 
+	api.registerRefunds(mux)
 	return api.withRequestLogging(withCORS(mux))
 }
 
@@ -314,16 +318,17 @@ func parsePositiveIntQuery(r *http.Request, key string, defaultValue int) (int, 
 
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, domain.ErrPaymentNotFound), errors.Is(err, domain.ErrSubscriptionNotFound):
+	case errors.Is(err, domain.ErrPaymentNotFound), errors.Is(err, domain.ErrSubscriptionNotFound), errors.Is(err, domain.ErrRefundNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, domain.ErrInvalidAmount),
+		errors.Is(err, domain.ErrIdempotencyKeyRequired),
 		errors.Is(err, domain.ErrInvalidCurrency),
 		errors.Is(err, domain.ErrInvalidPagination),
 		errors.Is(err, domain.ErrInvalidStatusFilter),
 		errors.Is(err, domain.ErrInvalidWebhookURL),
 		errors.Is(err, domain.ErrUserIDRequired):
 		writeError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, domain.ErrInvalidPaymentState), errors.Is(err, domain.ErrIdempotencyConflict):
+	case errors.Is(err, domain.ErrInvalidPaymentState), errors.Is(err, domain.ErrIdempotencyConflict), errors.Is(err, domain.ErrInvalidRefundState), errors.Is(err, domain.ErrRefundAmountExceeded):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -333,7 +338,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, X-User-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, Authorization, X-Request-ID")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -345,9 +350,16 @@ func withCORS(next http.Handler) http.Handler {
 
 func (api *API) requireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
-		if userID == "" {
-			writeServiceError(w, domain.ErrUserIDRequired)
+		parts := strings.Fields(r.Header.Get("Authorization"))
+		if api.authenticator == nil || len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, http.StatusUnauthorized, "bearer token required")
+			return
+		}
+		userID, err := api.authenticator.Authenticate(parts[1])
+		if err != nil || userID == "" {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, http.StatusUnauthorized, "invalid or expired token")
 			return
 		}
 		ctx := context.WithValue(r.Context(), userIDContextKey{}, userID)
